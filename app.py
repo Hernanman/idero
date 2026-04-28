@@ -6,13 +6,13 @@ import streamlit as st
 from djim_core import procesar_djim_web
 
 st.set_page_config(
-    page_title="DJIM Automatiza 360",
+    page_title="Automatiza 360",
     page_icon="📄",
     layout="centered",
 )
 
 st.title("📄 DJIM Automatiza 360")
-st.caption("Generador local de TXT DNRPA y Excel DJIM desde PDF ARCA-SIM. Sin APIs pagas.")
+st.caption("Generador local de TXT DNRPA y Excel DJIM desde PDF ARCA-SIM.")
 
 st.warning(
     "Esta versión gratuita usa extracción por texto y reglas. Funciona mejor con PDFs con texto seleccionable. "
