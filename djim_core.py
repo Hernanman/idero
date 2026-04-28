@@ -827,9 +827,12 @@ def llenar_djim_excel(datos: dict, template_path: str, output_path: str):
         sh[f"G{fila}"] = veh.get("año_fab", "")
         sh[f"H{fila}"] = veh.get("marca_motor", "")
         sh[f"I{fila}"] = veh.get("nro_motor", "")
-        sh[f"J{fila}"] = veh.get("marca_chasis", "")
+        # MARCA CHASIS: debe llevar el mismo código DNRPA de Marca, por ejemplo V41.
+        sh[f"J{fila}"] = veh.get("id_marca", cab.get("id_marca", veh.get("marca_chasis", "")))
         sh[f"K{fila}"] = veh.get("nro_chasis", "")
-        sh[f"L{fila}"] = veh.get("pais_fab_nombre", veh.get("pais_fab", ""))
+
+        # PAÍS FABRICACIÓN: debe llevar el código de procedencia, por ejemplo 203.
+        sh[f"L{fila}"] = cab.get("pais_procedencia_cod", veh.get("pais_fab", "203"))
         sh[f"M{fila}"] = veh.get("peso", "")
 
     # Fecha actual para el formulario
