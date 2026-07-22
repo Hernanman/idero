@@ -1,3 +1,4 @@
+import hashlib
 import tempfile
 from pathlib import Path
 
@@ -28,6 +29,21 @@ if "resultado_djim" not in st.session_state:
 pdf_file = st.file_uploader("Subí el PDF del despacho", type=["pdf"])
 template_file = st.file_uploader("Template DJIM Excel opcional", type=["xlsx"])
 
+# Vinculamos el resultado al PDF/template realmente cargados. Así, al cambiar
+# de despacho, desaparecen las descargas anteriores y nunca se entrega un TXT
+# perteneciente a otro PDF que hubiera quedado guardado en session_state.
+source_key = None
+pdf_bytes = None
+template_bytes = None
+if pdf_file is not None:
+    pdf_bytes = pdf_file.getvalue()
+    template_bytes = template_file.getvalue() if template_file is not None else b""
+    source_key = hashlib.sha256(pdf_bytes + b"|DJIM_TEMPLATE|" + template_bytes).hexdigest()
+
+    resultado_anterior = st.session_state.get("resultado_djim")
+    if resultado_anterior and resultado_anterior.get("source_key") != source_key:
+        st.session_state["resultado_djim"] = None
+
 procesar = st.button("Generar TXT / Excel", type="primary", disabled=pdf_file is None)
 
 if procesar and pdf_file:
@@ -36,12 +52,12 @@ if procesar and pdf_file:
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmpdir_path = Path(tmpdir)
                 pdf_path = tmpdir_path / pdf_file.name
-                pdf_path.write_bytes(pdf_file.getbuffer())
+                pdf_path.write_bytes(pdf_bytes if pdf_bytes is not None else pdf_file.getvalue())
 
                 template_path = None
                 if template_file is not None:
                     template_path = tmpdir_path / template_file.name
-                    template_path.write_bytes(template_file.getbuffer())
+                    template_path.write_bytes(template_bytes if template_bytes is not None else template_file.getvalue())
 
                 result = procesar_djim_web(
                     pdf_path=str(pdf_path),
@@ -54,6 +70,8 @@ if procesar and pdf_file:
 
                 # Guardamos bytes y nombres en memoria de sesión.
                 st.session_state["resultado_djim"] = {
+                    "source_key": source_key,
+                    "source_pdf_name": pdf_file.name,
                     "datos": result["datos"],
                     "campos_vacios": result.get("campos_vacios", []),
                     "txt_name": "DJIM_ELECTRONICA.txt",

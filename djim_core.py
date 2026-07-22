@@ -197,6 +197,49 @@ def extraer_importador_exportador(texto: str) -> Tuple[str, str]:
 
     return "", ""
 
+def extraer_despachante(texto: str) -> Tuple[str, str]:
+    """Extrae razón social/nombre y CUIT del despachante desde la cabecera SIM.
+
+    En los PDF OM-1993 el orden visual suele ser:
+      Importador + CUIT | Despachante de Aduana + CUIT
+    pero el extractor de texto entrega primero las etiquetas y luego ambos pares
+    de datos. Por eso no alcanza con buscar un CUIT inmediatamente después de
+    la palabra ``Despachante``.
+    """
+    m_etiqueta = re.search(r"DESPACHANTE\s+DE\s+ADUANA", texto, re.I)
+    if m_etiqueta:
+        resto = texto[m_etiqueta.end():]
+        m_fin = re.search(r"IMPORTADOR\s*/?\s*EXPORTADOR", resto, re.I)
+        ventana = resto[:m_fin.start()] if m_fin else resto[:900]
+
+        patron_cuit = r"\d{2}[- ]?\d{8}[- ]?\d"
+        coincidencias = list(re.finditer(patron_cuit, ventana))
+
+        # En la cabecera aparecen primero el CUIT del importador y luego el
+        # CUIT del despachante. Tomamos los dos últimos por tolerancia a texto
+        # adicional que pueda incluir el PDF.
+        if len(coincidencias) >= 2:
+            cuit_importador = coincidencias[-2]
+            cuit_despachante = coincidencias[-1]
+            nombre = ventana[cuit_importador.end():cuit_despachante.start()]
+            nombre = re.sub(r"CUIT\s*N[º°O]?", " ", nombre, flags=re.I)
+            nombre = re.sub(r"\*+", " ", nombre)
+            nombre = norm(nombre).strip(" :-")
+            return nombre.upper(), normalizar_cuit(cuit_despachante.group(0))
+
+        # Variante donde solo queda visible el par del despachante.
+        if len(coincidencias) == 1:
+            cuit_despachante = coincidencias[0]
+            nombre = ventana[:cuit_despachante.start()]
+            nombre = re.sub(r"CUIT\s*N[º°O]?", " ", nombre, flags=re.I)
+            nombre = re.sub(r"\*+", " ", nombre)
+            nombre = norm(nombre).strip(" :-")
+            if nombre and not re.fullmatch(r"DE\s+ADUANA", nombre, re.I):
+                return nombre.upper(), normalizar_cuit(cuit_despachante.group(0))
+
+    return "", ""
+
+
 def extraer_aduana(texto: str) -> Tuple[str, str]:
     for nombre, codigo in ADUANA_MAP.items():
         if re.search(re.escape(nombre), texto, re.I):
@@ -508,8 +551,11 @@ def extraer_datos_pdf(pdf_path: str) -> dict:
         comprador_rs = importador_rs
     if not comprador_cuit:
         comprador_cuit = importador_cuit
-    desp_rs = extraer_rs_cerca(["DESPACHANTE"], texto)
-    desp_cuit = extraer_cuit_cerca(["DESPACHANTE"], texto)
+    desp_rs, desp_cuit = extraer_despachante(texto)
+    if not desp_rs:
+        desp_rs = extraer_rs_cerca(["DESPACHANTE"], texto)
+    if not desp_cuit:
+        desp_cuit = extraer_cuit_cerca(["DESPACHANTE"], texto)
 
     # Si hay varios VIN, genera una línea por VIN. Si no encuentra, genera una para carga manual.
     if not vins:
@@ -575,7 +621,7 @@ def extraer_datos_pdf(pdf_path: str) -> dict:
         "fob_divisa": "DOL" if re.search(r"\bDOL\b|D[ÓO]LAR|USD", texto, re.I) else "",
         "flete_total": extraer_valor(["FLETE"], texto),
         "seguro_total": extraer_valor(["SEGURO"], texto),
-        "valor_aduana": extraer_valor(["VALOR ADUANA", "VAL\. ADUANA"], texto),
+        "valor_aduana": extraer_valor(["VALOR ADUANA", r"VAL\. ADUANA"], texto),
         "nro_factura": buscar(r"FACTURA[^\n]{0,60}?([A-Z0-9][A-Z0-9\-/]{2,30})", texto),
         "fecha_emision_factura": buscar_fecha_cerca(["EMISI[ÓO]N", "FECHA FACTURA"], texto),
         "total_bultos": extraer_valor(["TOTAL BULTOS", "BULTOS"], texto),
@@ -625,6 +671,7 @@ def campos_vacios_importantes(datos: dict) -> List[str]:
         ("cabecera.importador_cuit", datos.get("cabecera", {}).get("importador_cuit")),
         ("cabecera.posicion_sim", datos.get("cabecera", {}).get("posicion_sim")),
         ("cabecera.lcm_nro", datos.get("cabecera", {}).get("lcm_nro")),
+        ("cabecera.despachante_cuit", datos.get("cabecera", {}).get("despachante_cuit")),
     ]
     for i, v in enumerate(datos.get("vehiculos", []), start=1):
         checks.append((f"vehiculos[{i}].nro_chasis", v.get("nro_chasis")))
@@ -908,7 +955,7 @@ def generar_txt_dnrpa(datos: dict, output_path: str):
         cab.get("comprador_cuit", ""),           # 07 NRO DOC COM
         "12",                                    # 08 TIPO DOC DESP
         cab.get("despachante_cuit", ""),         # 09 NRO DOC DESP
-        "S",                                     # 10 ID_REGIMEN
+        cab.get("cod_regimen", "20"),             # 10 ID_REGIMEN
         fecha_of_fmt,                            # 11 FECHA OFIC (DD/MM/YYYY con ceros)
         cab.get("pais_procedencia_cod", "203"),  # 12 PAÍS PROC
         cant_lineas,                             # 13 CANT.LÍNEAS
@@ -949,7 +996,7 @@ def generar_txt_dnrpa(datos: dict, output_path: str):
         lineas.append(_csv_line(linea_veh))
 
     # Sin encabezados — el sistema DNRPA no los espera
-    with open(output_path, "w", encoding="utf-8", newline="\n") as f:
+    with open(output_path, "w", encoding="utf-8", newline="\r\n") as f:
         for linea in lineas:
             f.write(linea + "\n")
 
