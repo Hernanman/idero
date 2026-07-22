@@ -6,13 +6,13 @@ import streamlit as st
 from djim_core import procesar_djim_web
 
 st.set_page_config(
-    page_title="Automatiza 360",
+    page_title="DJIM Automatiza 360",
     page_icon="📄",
     layout="centered",
 )
 
 st.title("📄 DJIM Automatiza 360")
-st.caption("Generador local de TXT DNRPA y Excel DJIM desde PDF ARCA-SIM.")
+st.caption("Generador local de TXT DNRPA y Excel DJIM desde PDF ARCA-SIM. Sin APIs pagas.")
 
 st.warning(
     "Esta versión gratuita usa extracción por texto y reglas. Funciona mejor con PDFs con texto seleccionable. "
@@ -56,7 +56,7 @@ if procesar and pdf_file:
                 st.session_state["resultado_djim"] = {
                     "datos": result["datos"],
                     "campos_vacios": result.get("campos_vacios", []),
-                    "txt_name": txt_path.name,
+                    "txt_name": "DJIM_ELECTRONICA.txt",
                     "txt_bytes": txt_path.read_bytes(),
                     "xlsx_name": xlsx_path.name if xlsx_path else None,
                     "xlsx_bytes": xlsx_path.read_bytes() if xlsx_path else None,

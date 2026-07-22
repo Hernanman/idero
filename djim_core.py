@@ -986,7 +986,7 @@ def procesar_djim_web(pdf_path: str, output_dir: str, template_path: str | None 
 
     base = Path(pdf_path).stem
     output_xlsx = output_dir_p / f"DJIM_{base}.xlsx"
-    output_txt = output_dir_p / f"DJIM_{base}.txt"
+    output_txt = output_dir_p / "DJIM_ELECTRONICA.txt"
     output_json = output_dir_p / f"DJIM_{base}_datos.json"
 
     datos = extraer_datos_pdf(pdf_path)
