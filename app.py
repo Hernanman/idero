@@ -4,7 +4,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from djim_core import procesar_djim_web
+from djim_core import DJIM_PARSER_VERSION, procesar_djim_web
 
 st.set_page_config(
     page_title="DJIM Automatiza 360",
@@ -26,6 +26,12 @@ st.warning(
 if "resultado_djim" not in st.session_state:
     st.session_state["resultado_djim"] = None
 
+# Al actualizar el parser se descarta cualquier resultado generado con una
+# versión anterior, aunque el usuario mantenga cargado exactamente el mismo PDF.
+resultado_guardado = st.session_state.get("resultado_djim")
+if resultado_guardado and resultado_guardado.get("parser_version") != DJIM_PARSER_VERSION:
+    st.session_state["resultado_djim"] = None
+
 pdf_file = st.file_uploader("Subí el PDF del despacho", type=["pdf"])
 template_file = st.file_uploader("Template DJIM Excel opcional", type=["xlsx"])
 
@@ -38,7 +44,13 @@ template_bytes = None
 if pdf_file is not None:
     pdf_bytes = pdf_file.getvalue()
     template_bytes = template_file.getvalue() if template_file is not None else b""
-    source_key = hashlib.sha256(pdf_bytes + b"|DJIM_TEMPLATE|" + template_bytes).hexdigest()
+    source_key = hashlib.sha256(
+        pdf_bytes
+        + b"|DJIM_TEMPLATE|"
+        + template_bytes
+        + b"|PARSER_VERSION|"
+        + DJIM_PARSER_VERSION.encode("utf-8")
+    ).hexdigest()
 
     resultado_anterior = st.session_state.get("resultado_djim")
     if resultado_anterior and resultado_anterior.get("source_key") != source_key:
@@ -71,6 +83,7 @@ if procesar and pdf_file:
                 # Guardamos bytes y nombres en memoria de sesión.
                 st.session_state["resultado_djim"] = {
                     "source_key": source_key,
+                    "parser_version": DJIM_PARSER_VERSION,
                     "source_pdf_name": pdf_file.name,
                     "datos": result["datos"],
                     "campos_vacios": result.get("campos_vacios", []),
@@ -107,6 +120,13 @@ if resultado:
         st.warning("Campos importantes no detectados automáticamente. Revisalos antes de presentar:")
         st.write(campos_vacios)
 
+    salida_invalida = not cab.get("nro_despacho_raw") or not cab.get("fecha_oficializacion")
+    if salida_invalida:
+        st.error(
+            "No se habilita la descarga porque falta el número de despacho o la fecha de oficialización. "
+            "Volvé a generar el archivo con esta versión del parser."
+        )
+
     with st.expander("Ver JSON extraído solo para control interno"):
         st.json(datos)
 
@@ -118,6 +138,7 @@ if resultado:
         file_name=resultado["txt_name"],
         mime="text/plain",
         key="download_txt",
+        disabled=salida_invalida,
     )
 
     if resultado.get("xlsx_bytes"):
@@ -127,6 +148,7 @@ if resultado:
             file_name=resultado["xlsx_name"],
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="download_xlsx",
+            disabled=salida_invalida,
         )
     else:
         st.info("No se generó Excel porque no subiste template DJIM .xlsx.")

@@ -59,6 +59,7 @@ def extraer_texto_pdf(pdf_path: str) -> str:
     )
 
 # Configuración DJIM
+DJIM_PARSER_VERSION = "2026.07.22.3"
 DJIM_PRIMERA_FILA_DATOS = 16
 ADUANA_MAP = {
     "paso de los libres": "42",
@@ -117,16 +118,72 @@ def buscar(pattern: str, texto: str, flags=re.I|re.S, group: int = 1, default: s
     m = re.search(pattern, texto, flags)
     return norm(m.group(group)) if m else default
 
+def _normalizar_fecha_encontrada(valor: str) -> str:
+    """Quita espacios internos y normaliza una fecha detectada en el PDF."""
+    valor = re.sub(r"\s*([/\-])\s*", r"\1", valor or "")
+    return formatear_fecha_dnrpa(valor)
+
+
 def buscar_fecha_cerca(etiquetas: List[str], texto: str) -> str:
+    """Busca una fecha cerca de una etiqueta, tolerando saltos de línea.
+
+    Se limita la ventana para no terminar tomando fechas ajenas de la sección
+    Información Complementaria.
+    """
+    patron_fecha = r"(\d{1,2}\s*[/\-]\s*\d{1,2}\s*[/\-]\s*\d{4}|\d{4}\s*[/\-]\s*\d{1,2}\s*[/\-]\s*\d{1,2})"
     for et in etiquetas:
-        # etiqueta ... dd/mm/yyyy o dd-mm-yyyy o yyyy-mm-dd
-        p = rf"{et}[^\n]{{0,120}}?(\d{{1,2}}[/\-]\d{{1,2}}[/\-]\d{{4}}|\d{{4}}[/\-]\d{{1,2}}[/\-]\d{{1,2}})"
-        v = buscar(p, texto)
-        if v:
-            return formatear_fecha_dnrpa(v)
-    # fallback: primera fecha del documento
-    v = buscar(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", texto)
-    return formatear_fecha_dnrpa(v) if v else ""
+        for m_et in re.finditer(et, texto, re.I):
+            ventana = texto[m_et.end():m_et.end() + 260]
+            m_fecha = re.search(patron_fecha, ventana, re.I)
+            if m_fecha:
+                return _normalizar_fecha_encontrada(m_fecha.group(1))
+    return ""
+
+
+def extraer_fecha_oficializacion(texto: str, nro_despacho_raw: str = "") -> str:
+    """Extrae exclusivamente la fecha de oficialización del despacho.
+
+    Prioriza la leyenda OFICIALIZADO del pie, luego la cabecera y finalmente
+    la fecha más cercana al número de despacho. No usa un fallback genérico
+    porque podría confundir FECHA INIC.ACTIV o FECHAEMISIONFACT.
+    """
+    patron_fecha = r"(\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{4}|\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{4})"
+
+    # El pie de los formularios SIM es el indicador más inequívoco.
+    m = re.search(rf"OFICIALIZADO\s*{patron_fecha}", texto, re.I)
+    if m:
+        return _normalizar_fecha_encontrada(m.group(1))
+
+    # Cabecera: la fecha puede quedar en la misma línea o varias líneas después.
+    for m_et in re.finditer(r"OFICIALIZACI[ÓO]N", texto, re.I):
+        ventana = texto[m_et.end():m_et.end() + 420]
+        # Frenar antes del bloque de datos del importador si aparece.
+        ventana = re.split(r"IMPORTADOR\s*/?\s*EXPORTADOR|AGENTE\s+DE\s+TRANSPORTE", ventana, maxsplit=1, flags=re.I)[0]
+        fechas = list(re.finditer(patron_fecha, ventana, re.I))
+        if fechas:
+            return _normalizar_fecha_encontrada(fechas[0].group(1))
+
+    # En algunos extractores la etiqueta y la fecha se desordenan, pero ambas
+    # quedan cerca del número de despacho.
+    if nro_despacho_raw:
+        variantes = [
+            re.escape(nro_despacho_raw),
+            re.escape(re.sub(r"\s+", "", nro_despacho_raw)),
+        ]
+        for variante in variantes:
+            m_nro = re.search(variante, texto, re.I)
+            if m_nro:
+                ini = max(0, m_nro.start() - 300)
+                fin = min(len(texto), m_nro.end() + 300)
+                ventana = texto[ini:fin]
+                fechas = list(re.finditer(patron_fecha, ventana, re.I))
+                if fechas:
+                    # Elegir la fecha cuya posición esté más próxima al despacho.
+                    centro_nro = m_nro.start() - ini
+                    mejor = min(fechas, key=lambda x: abs(x.start() - centro_nro))
+                    return _normalizar_fecha_encontrada(mejor.group(1))
+
+    return ""
 
 def extraer_cuit_cerca(etiquetas: List[str], texto: str) -> str:
     for et in etiquetas:
@@ -198,44 +255,49 @@ def extraer_importador_exportador(texto: str) -> Tuple[str, str]:
     return "", ""
 
 def extraer_despachante(texto: str) -> Tuple[str, str]:
-    """Extrae razón social/nombre y CUIT del despachante desde la cabecera SIM.
+    """Extrae nombre y CUIT del despachante sin confundir números de pagos.
 
-    En los PDF OM-1993 el orden visual suele ser:
-      Importador + CUIT | Despachante de Aduana + CUIT
-    pero el extractor de texto entrega primero las etiquetas y luego ambos pares
-    de datos. Por eso no alcanza con buscar un CUIT inmediatamente después de
-    la palabra ``Despachante``.
+    Los motores PDF entregan la cabecera SIM en órdenes diferentes. Se buscan
+    estructuras completas de cabecera, no cualquier secuencia de 11 dígitos,
+    porque referencias como ``26-008112346-PES-VP`` pueden parecer un CUIT.
     """
-    m_etiqueta = re.search(r"DESPACHANTE\s+DE\s+ADUANA", texto, re.I)
-    if m_etiqueta:
-        resto = texto[m_etiqueta.end():]
-        m_fin = re.search(r"IMPORTADOR\s*/?\s*EXPORTADOR", resto, re.I)
-        ventana = resto[:m_fin.start()] if m_fin else resto[:900]
+    cuit = r"(\d{2}[- ]?\d{8}[- ]?\d)"
+    nombre = r"([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ .,&'/-]{2,100}?)"
+    cabecera = texto[:5000]
 
-        patron_cuit = r"\d{2}[- ]?\d{8}[- ]?\d"
-        coincidencias = list(re.finditer(patron_cuit, ventana))
+    patrones = [
+        # PyMuPDF/pdfplumber: Importador + CUIT + Despachante + CUIT.
+        rf"\(\s*IVA\s+INS\s*:\s*SI\s*\)\s*{cuit}\s*{nombre}\s*{cuit}",
+        # Nombre y CUIT ubicados inmediatamente después de la etiqueta.
+        rf"DESPACHANTE\s+DE\s+ADUANA(?:\s+CUIT\s*N[º°O]?)?\s*[:\-]?\s*{nombre}\s*{cuit}",
+        # Etiquetas primero y pares de datos en la línea siguiente.
+        rf"IMPORTADOR\s*/?\s*EXPORTADOR.*?DESPACHANTE\s+DE\s+ADUANA.*?\(\s*IVA\s+INS\s*:\s*SI\s*\)\s*{cuit}\s*{nombre}\s*{cuit}",
+    ]
 
-        # En la cabecera aparecen primero el CUIT del importador y luego el
-        # CUIT del despachante. Tomamos los dos últimos por tolerancia a texto
-        # adicional que pueda incluir el PDF.
-        if len(coincidencias) >= 2:
-            cuit_importador = coincidencias[-2]
-            cuit_despachante = coincidencias[-1]
-            nombre = ventana[cuit_importador.end():cuit_despachante.start()]
-            nombre = re.sub(r"CUIT\s*N[º°O]?", " ", nombre, flags=re.I)
-            nombre = re.sub(r"\*+", " ", nombre)
-            nombre = norm(nombre).strip(" :-")
-            return nombre.upper(), normalizar_cuit(cuit_despachante.group(0))
+    for i, patron in enumerate(patrones):
+        m = re.search(patron, cabecera, re.I | re.S)
+        if not m:
+            continue
+        grupos = m.groups()
+        if i in (0, 2):
+            # grupo 1 = CUIT importador, grupo 2 = nombre, grupo 3 = CUIT despachante
+            nom, nro = grupos[1], grupos[2]
+        else:
+            nom, nro = grupos[0], grupos[1]
+        nom = norm(re.sub(r"CUIT\s*N[º°O]?", " ", nom, flags=re.I)).strip(" :-")
+        if nom and nro:
+            return nom.upper(), normalizar_cuit(nro)
 
-        # Variante donde solo queda visible el par del despachante.
-        if len(coincidencias) == 1:
-            cuit_despachante = coincidencias[0]
-            nombre = ventana[:cuit_despachante.start()]
-            nombre = re.sub(r"CUIT\s*N[º°O]?", " ", nombre, flags=re.I)
-            nombre = re.sub(r"\*+", " ", nombre)
-            nombre = norm(nombre).strip(" :-")
-            if nombre and not re.fullmatch(r"DE\s+ADUANA", nombre, re.I):
-                return nombre.upper(), normalizar_cuit(cuit_despachante.group(0))
+    # Fallback por líneas: localizar una línea que contenga dos CUIT y quedarse
+    # con el texto comprendido entre ambos.
+    for linea in [norm(x) for x in cabecera.splitlines() if norm(x)]:
+        if "IVA INS" not in linea.upper():
+            continue
+        ms = list(re.finditer(cuit, linea, re.I))
+        if len(ms) >= 2:
+            nom = norm(linea[ms[0].end():ms[1].start()]).strip(" :-")
+            if nom:
+                return nom.upper(), normalizar_cuit(ms[1].group(1))
 
     return "", ""
 
@@ -250,17 +312,38 @@ def extraer_aduana(texto: str) -> Tuple[str, str]:
         return nombre, ADUANA_MAP.get(nombre.lower(), "00")
     return "", "00"
 
+def _armar_despacho(anio: str, aduana: str, tipo: str, numero: str, dc: str) -> Tuple[str, str, str]:
+    anio = anio.zfill(2)
+    aduana = aduana.zfill(3)
+    tipo = tipo.upper()
+    numero = numero.zfill(6)
+    dc = dc.upper()
+    return f"{anio} {aduana} {tipo} {numero} {dc}", aduana, tipo
+
+
 def extraer_despacho(texto: str) -> Tuple[str, str, str]:
-    # Ej: 26 042 IC03 001578 U
-    m = re.search(r"\b(\d{2})\s+(\d{3})\s+([A-Z]{1,3}\d{2})\s+(\d{4,8})\s+([A-Z])\b", texto)
+    """Extrae Año/Aduana/Tipo/Número/DC en formatos separados o concatenados."""
+    patrones = [
+        # Formato normal del encabezado: 26 042 IC03 003359 T.
+        r"(?<!\d)(\d{2})\s+(\d{3})\s+([A-Z]{1,3}\d{2})\s+(\d{4,8})\s+([A-Z])(?![A-Z0-9])",
+        # Tolera barras, guiones y etiquetas intercaladas por el extractor PDF.
+        r"(?<!\d)(\d{2})[\s/|.-]{1,12}(\d{3})[\s/|.-]{1,12}([A-Z]{1,3}\d{2})[\s/|.-]{1,12}(\d{4,8})[\s/|.-]{1,12}([A-Z])(?![A-Z0-9])",
+        # Formato pegado que suele aparecer al pie: 26042IC03003359T.
+        r"(?<![A-Z0-9])(\d{2})(\d{3})([A-Z]{1,3}\d{2})(\d{6,8})([A-Z])(?![A-Z0-9])",
+    ]
+    for patron in patrones:
+        m = re.search(patron, texto, re.I)
+        if m:
+            return _armar_despacho(*m.groups())
+    return "", "", ""
+
+
+def extraer_despacho_desde_nombre_archivo(pdf_path: str) -> Tuple[str, str, str]:
+    """Fallback para PDFs cuyo nombre contiene 26042IC03003359T."""
+    nombre = Path(pdf_path).stem.upper()
+    m = re.search(r"(?<![A-Z0-9])(\d{2})(\d{3})([A-Z]{1,3}\d{2})(\d{6,8})([A-Z])(?![A-Z0-9])", nombre)
     if m:
-        raw = f"{m.group(1)} {m.group(2)} {m.group(3)} {m.group(4)} {m.group(5)}"
-        return raw, m.group(2), m.group(3)
-    # Variante pegada
-    m = re.search(r"\b(\d{2})(\d{3})([A-Z]{1,3}\d{2})(\d{4,8})([A-Z])\b", texto)
-    if m:
-        raw = f"{m.group(1)} {m.group(2)} {m.group(3)} {m.group(4)} {m.group(5)}"
-        return raw, m.group(2), m.group(3)
+        return _armar_despacho(*m.groups())
     return "", "", ""
 
 def extraer_posicion_sim(texto: str) -> str:
@@ -518,11 +601,15 @@ def extraer_total_kg_neto(texto: str) -> str:
 def extraer_datos_pdf(pdf_path: str) -> dict:
     texto = limpiar_texto(extraer_texto_pdf(pdf_path))
     raw, adu_cod_from_nro, subregimen = extraer_despacho(texto)
+    if not raw:
+        raw, adu_cod_from_nro, subregimen = extraer_despacho_desde_nombre_archivo(pdf_path)
+
     aduana_nombre, aduana_id = extraer_aduana(texto)
     if adu_cod_from_nro and aduana_id == "00":
         aduana_id = str(int(adu_cod_from_nro)) if adu_cod_from_nro.isdigit() else adu_cod_from_nro
-    fecha_of = buscar_fecha_cerca(["OFICIALIZ", "FECHA OFIC", "FECHA"], texto)
-    fecha_arribo = buscar_fecha_cerca(["ARRIBO", "FECHA ARRIBO"], texto)
+
+    fecha_of = extraer_fecha_oficializacion(texto, raw)
+    fecha_arribo = buscar_fecha_cerca([r"FECHA\s+ARRIBO", r"ARRIBO"], texto)
     pos_sim = extraer_posicion_sim(texto)
     lcm_leyenda = extraer_lcm_leyenda(texto)
     lcm_nro, lcm_anio = extraer_lcm(texto)
@@ -656,6 +743,7 @@ def extraer_datos_pdf(pdf_path: str) -> dict:
         },
         "_auditoria": {
             "motor": "local-regex",
+            "parser_version": DJIM_PARSER_VERSION,
             "advertencia": "Extraccion gratuita por texto/regex. Revisar campos vacios antes de presentar.",
             "campos_vacios": [],
         }
