@@ -59,7 +59,7 @@ def extraer_texto_pdf(pdf_path: str) -> str:
     )
 
 # Configuración DJIM
-DJIM_PARSER_VERSION = "2026.07.22.3"
+DJIM_PARSER_VERSION = "2026.10.07.1"
 DJIM_PRIMERA_FILA_DATOS = 16
 ADUANA_MAP = {
     "paso de los libres": "42",
@@ -264,6 +264,21 @@ def extraer_despachante(texto: str) -> Tuple[str, str]:
     cuit = r"(\d{2}[- ]?\d{8}[- ]?\d)"
     nombre = r"([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ .,&'/-]{2,100}?)"
     cabecera = texto[:5000]
+
+    # Algunos PDFs SIM extraídos por PyMuPDF reordenan la cabecera como:
+    # CUIT despachante / Importador (IVA INS) / CUIT importador / Nombre despachante.
+    patron_reordenado = (
+        rf"{cuit}\s*\n"
+        rf"[^\n]{{2,120}}?\(\s*IVA\s+INS\s*:\s*SI\s*\)\s*\n"
+        rf"{cuit}\s*\n"
+        rf"{nombre}(?=\s*\n)"
+    )
+    m = re.search(patron_reordenado, cabecera, re.I)
+    if m:
+        desp_cuit = normalizar_cuit(m.group(1))
+        desp_nombre = norm(m.group(3)).strip(" :-").upper()
+        if desp_nombre and desp_cuit:
+            return desp_nombre, desp_cuit
 
     patrones = [
         # PyMuPDF/pdfplumber: Importador + CUIT + Despachante + CUIT.
